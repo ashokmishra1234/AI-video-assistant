@@ -1,11 +1,33 @@
 import yt_dlp
 from pydub import AudioSegment
+from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
 import os
+import re
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-def download_youtube_audio(url):
+
+def extract_video_id(url: str) -> str:
+    pattern = r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})"
+    match = re.search(pattern, url)
+    return match.group(1) if match else None
+
+
+def get_youtube_transcript(url: str) -> str | None:
+    video_id = extract_video_id(url)
+    if not video_id:
+        return None
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "hi"])
+        return " ".join([t["text"] for t in transcript])
+    except (NoTranscriptFound, TranscriptsDisabled):
+        return None
+    except Exception:
+        return None
+
+
+def download_youtube_audio(url: str) -> str:
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': os.path.join(DOWNLOAD_DIR, '%(id)s.%(ext)s'),
@@ -14,7 +36,6 @@ def download_youtube_audio(url):
             'preferredcodec': 'wav',
         }],
     }
-
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
@@ -33,20 +54,28 @@ def convert_to_wav(input_path: str) -> str:
 def chunk_audio(wav_path: str, chunk_minutes: int = 10) -> list:
     audio = AudioSegment.from_wav(wav_path)
     chunk_ms = chunk_minutes * 60 * 1000
-
     chunks = []
-
     for i, start in enumerate(range(0, len(audio), chunk_ms)):
         chunk = audio[start: start + chunk_ms]
         chunk_path = f"{wav_path}_chunk_{i}.wav"
         chunk.export(chunk_path, format="wav")
         chunks.append(chunk_path)
-
     return chunks
 
-def process_input(source: str) -> list:
+
+def process_input(source: str):
+    """
+    Returns (transcript_text, None) if YouTube captions found.
+    Returns (None, chunks) if audio needs Whisper transcription.
+    """
     if source.startswith("http://") or source.startswith("https://"):
-        print("Detected YouTube URL. Downloading audio...")
+        print("Trying YouTube captions (fast path)...")
+        transcript = get_youtube_transcript(source)
+        if transcript:
+            print("Captions found — skipping audio download.")
+            return transcript, None
+
+        print("No captions found — downloading audio for Whisper...")
         wav_path = download_youtube_audio(source)
     else:
         print("Detected local file. Converting to WAV...")
@@ -54,5 +83,5 @@ def process_input(source: str) -> list:
 
     print("Chunking audio...")
     chunks = chunk_audio(wav_path)
-    print(f"Audio ready — {len(chunks)} chunk(s) created.")
-    return chunks
+    print(f"Audio ready — {len(chunks)} chunk(s).")
+    return None, chunks
